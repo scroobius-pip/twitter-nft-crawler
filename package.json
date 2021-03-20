@@ -4,11 +4,17 @@
   "description": "",
   "main": "index.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "ts-node index.ts",
+    "build": "tsc index.ts"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "bull": "^3.21.1"
+    "bull": "^3.21.1",
+    "bullmq": "^1.15.1",
+    "neverthrow": "^4.2.1"
+  },
+  "devDependencies": {
+    "ts-node": "^9.1.1"
   }
 }
