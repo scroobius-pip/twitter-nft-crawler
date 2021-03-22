@@ -1,11 +1,32 @@
 import { Queue, Worker, Job, QueueScheduler } from 'bullmq';
+import * as redis from 'ioredis'
 
+
+// import { promisify } from 'util'
+
+const redisClient = redis('profilestwitter.nwr8vq.0001.use1.cache.amazonaws.com', { enableAutoPipelining: true })
 
 const schedulerQueue = new QueueScheduler('scheduler')
 
 const importQueue = new Queue('import');
 const exportQueue = new Queue('export')
 
+
+
+function addToRedisSet(marshalledUsersInfo: MarshalledUserInfo[]): Promise<number> {
+    return redisClient.sadd('twitterusers', marshalledUsersInfo)
+}
+
+function getNonExistingUsersInfo(marshalledUsersInfo: MarshalledUserInfo[]): Promise<UserName[]> {
+  
+    return new Promise((resolve, reject) => {
+        redisClient.smismember('twitterusers', marshalledUsersInfo, (err: Error, reply: number[]) => {
+
+            console.log(reply)
+            err ? reject(err) : resolve([])
+        })
+    })
+}
 
 type UserName = string //actually user handle
 type MarshalledUserInfo = string
@@ -29,9 +50,6 @@ async function addUserInfoExportJob(marshalledUsersInfo: string) {
 
 async function addInitialJob() {
     await addUserImportJob('simdi_jinkins,twitterapi')
-
-    // await exportQueue.add('export', 'simdi_jinkins\n1195946508006412293/ZKddKyho,simdi_jinkins\n1195946508006412293/ZKddKyho,simdi_jinkins\n1195946508006412293/ZKddKyho', { removeOnFail: 1000 })
-
 }
 
 
@@ -39,43 +57,30 @@ async function addInitialJob() {
 
 const importWorker = new Worker<UserName, void>('import', async (job) => {
     const userNames = job.data.split(',')
-
-    const existingUserCount = await getExistingUserNameCount(userNames)
-
-
-    const shouldContinue = existingUserCount < (userNames.length / 2)
-    if (!shouldContinue) return
-
     const usersInfo = await getUsersInfo(userNames)
 
-
-    const filteredMarshalledUserInfo = usersInfo
-        .filter(({ followers }) => followers.length > 20000)
+    const filteredMarshalledUsersInfo = usersInfo
+        .filter(({ followers }) => followers.length > 200)
         .map(marshallUserInfo)
-        .join(',')
-
-    const followerUserNames = usersInfo
-        .map(({ followers }) => followers.join(','))
-        .join(',')
 
 
-    await addUserInfoExportJob(filteredMarshalledUserInfo)
-    await addUserImportJob(followerUserNames)
+    const nonExistingUsersInfo = await getNonExistingUsersInfo(filteredMarshalledUsersInfo)
+    const nonExistingUsersNames = nonExistingUsersInfo.map(getUserNameFromMarshalledUserInfo)
+
+    const followerUserNames = usersInfo.filter(({ name }) => nonExistingUsersNames.includes(name)).flatMap(u => u.followers)
+
+
+
+    await addUserInfoExportJob(filteredMarshalledUsersInfo.join(','))
+    await addUserImportJob(followerUserNames.join(','))
 
 }, { concurrency: 10 })
 
-const exportWorker = new Worker('export', async (job) => {
-    console.log(job.data)
-    return ''
-}, { concurrency: 100 })
+const exportWorker = new Worker<string, void>('export', async (job) => {
+    await addToRedisSet(job.data.split(','))
+}, { concurrency: 1000 })
 
-// importWorker.on('completed', (job) => {
-//     console.log(`${job.data} completed`)
-// })
 
-// exportWorker.on('completed', (job, returnValue) => {
-//     console.log(`${job.data} completed`)
-// })
 
 async function getUsersInfo(usernames: UserName[]): Promise<UserInfo[]> {
     return []
@@ -99,6 +104,10 @@ function marshallUserInfo({ id, name, photoUrl, followers }: UserInfo): Marshall
     return [id, name, parsePhotoIdFromPhotoUrl(photoUrl), followers.length].join('\n')
 }
 
+function getUserNameFromMarshalledUserInfo(marshalledUsersInfo: MarshalledUserInfo): string {
+    return marshalledUsersInfo.split('\n')[1]
+}
+
 function parsePhotoIdFromPhotoUrl(photoUrl: string): string {
     try {
         const regex = /(?:s\/)(.*)(?:_)/
@@ -106,7 +115,8 @@ function parsePhotoIdFromPhotoUrl(photoUrl: string): string {
     } catch (error) {
         throw Error('Could not get photo id from url:' + photoUrl)
     }
-
 }
+
+
 
 addInitialJob()

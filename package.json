@@ -5,13 +5,15 @@
   "main": "index.ts",
   "scripts": {
     "start": "ts-node index.ts",
-    "build": "tsc index.ts"
+    "build": "tsc index.ts",
+    "test": "ts-node tests.ts"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
     "bull": "^3.21.1",
     "bullmq": "^1.15.1",
+    "ioredis": "^4.24.2",
     "neverthrow": "^4.2.1"
   },
   "devDependencies": {
