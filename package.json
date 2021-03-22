@@ -14,7 +14,9 @@
     "bull": "^3.21.1",
     "bullmq": "^1.15.1",
     "ioredis": "^4.24.2",
-    "neverthrow": "^4.2.1"
+    "needle": "^2.6.0",
+    "neverthrow": "^4.2.1",
+    "p-ratelimit": "^1.0.1"
   },
   "devDependencies": {
     "ts-node": "^9.1.1"
