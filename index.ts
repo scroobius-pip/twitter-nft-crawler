@@ -1,89 +1,157 @@
 import { Queue, Worker, Job, QueueScheduler } from 'bullmq';
 import * as redis from 'ioredis'
-
-
-
+import * as needle from 'needle'
+import chunk = require('chunk');
+import { pRateLimit } from 'p-ratelimit'
+import pipe = require('p-pipe')
 
 const redisClient = new redis('ec2-3-236-123-111.compute-1.amazonaws.com', { enableAutoPipelining: true })
 
 const schedulerQueue = new QueueScheduler('scheduler')
 
 const importQueue = new Queue('import')
+const followerImportQueue = new Queue('follower_import')
 const exportQueue = new Queue('export') //QUEUE OF MARSHALLED
 
 
-
-function addToRedisSet(marshalledUsersInfo: MarshalledUserInfo[]): Promise<number> {
-    return redisClient.sadd('twitterusers', marshalledUsersInfo)
+interface TwitterUser {
+    "profile_image_url": string
+    "username": string
+    "id": string,
+    "public_metrics": {
+        "followers_count": number,
+        "following_count": number,
+        "tweet_count": number,
+    }
 }
 
-async function getNonExistingUsersInfo(marshalledUsersInfo: MarshalledUserInfo[]): Promise<MarshalledUserInfo[]> {
-    const result = await (redisClient as any).smismember('twitterusers', marshalledUsersInfo) as number[]
-    return marshalledUsersInfo.filter((_, i) => result[i] === 0)
+
+async function getTwitterUsers(userIds: string[]): Promise<TwitterUser[]> {
+    const twitterUserResponse = await needle('get', `https://api.twitter.com/2/users?ids=${userIds.join(',')}&user.fields=profile_image_url,public_metrics`, {
+        headers: {
+            'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAABCINwEAAAAAE84d%2BfYIClOTvkrWajggz6%2FnQEo%3DCFjvHp6J0wnPIQSCA0IF9RLr0aPI4O7MkevqKsiawqJihElwmB'
+        }
+    })
+    if (twitterUserResponse.body.errors) throw Error(twitterUserResponse.body.errors)
+    const twitterUsers = twitterUserResponse.body.data as Array<TwitterUser>
+
+    return twitterUsers
 }
 
-type UserName = string //actually user handle
+async function getTwitterUserFollowers(userid: string): Promise<TwitterUser[]> {
+    const twitterUserResponse = await needle('get', `https://api.twitter.com/2/users/${userid}/following?user.fields=profile_image_url,created_at,public_metrics&max_results=1000`, {
+        headers: {
+            'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAABCINwEAAAAAE84d%2BfYIClOTvkrWajggz6%2FnQEo%3DCFjvHp6J0wnPIQSCA0IF9RLr0aPI4O7MkevqKsiawqJihElwmB'
+        }
+    })
+    if (twitterUserResponse.body.errors) throw Error(twitterUserResponse.body.errors)
+    const twitterUsers = twitterUserResponse.body.data as Array<TwitterUser>
+
+    return twitterUsers
+}
+
+
+function addToRedisSet(marshalledUsersInfo: MarshalledUserInfo[], userIds: string[]): Promise<[number, number]> {
+    return Promise.all([
+        redisClient.sadd('twitterIds', userIds),
+        redisClient.sadd('twitterusers', marshalledUsersInfo)
+    ])
+}
+
+// async function getNonExistingUsersInfo(usersInfo: TwitterUser[]): Promise<TwitterUser[]> {
+//     const marshalledUsersInfo = usersInfo.map(marshallUserInfo)
+//     const result = await (redisClient as any).smismember('twitterusers', marshalledUsersInfo) as number[]
+//     return usersInfo.filter((_, i) => result[i] === 0)
+// }
+
+
+// async function getNonExistingUserIds(userids: string[]): Promise<string[]> {
+//     const result = await (redisClient as any).exists(userids) as number[]
+//     return userids.filter((_, i) => result[i] === 0)
+// }
+
 type MarshalledUserInfo = string
 
-interface UserInfo {
-    name: UserName
-    followers: UserName[]
-    photoUrl: string
+
+
+async function addFollowerImportJob(id: string) {
+    await followerImportQueue.add('follower_import', id, { attempts: 20, backoff: { type: 'exponential', delay: 1000 } })
 }
 
-
-async function addUserImportJob(usernames: string) {
-    await importQueue.add('import', usernames, { attempts: 20, backoff: { type: 'exponential', delay: 1000 } })
+async function addUserImportJob(userids: string[]) {
+    await importQueue.add('import', userids, { attempts: 20, backoff: { type: 'exponential', delay: 1000 } })
 }
 
-async function addUserInfoExportJob(marshalledUsersInfo: string) {
-    await exportQueue.add('export', marshallUserInfo, { attempts: 50, backoff: { type: 'exponential', delay: 100 } })
+async function addUserInfoExportJob(usersInfo: TwitterUser[]) {
+    await exportQueue.add('export', usersInfo, { attempts: 50, backoff: { type: 'exponential', delay: 100 } })
 }
 
 
 async function addInitialJob() {
-    await addUserImportJob('simdi_jinkins')
+    await addUserImportJob(['1364516985963352065', '1016872927373844482', '78941384'])
 }
 
 
+const followerImportWorker = new Worker<string, void>('follower_import', async (job) => {
+    await followerImportPipeline(job.data)
+}, { concurrency: 1000 })
+
+const followerImportPipeline = pipe(
+    getTwitterUserFollowers,
+    removeInvalidAccounts,
+    (validAccounts) => {
+        const userIds = validAccounts.map(a => a.id)
+        chunk(userIds, 100).forEach(addUserImportJob)
+        return validAccounts
+    },
+    addUserInfoExportJob)
+
+followerImportWorker.on('completed', job => {
+    console.log('(follower-import)done: \n' + JSON.stringify(job.data))
+})
+
+const importPipeline = pipe(
+    getTwitterUsers,
+    removeInvalidAccounts,
+    (validAccounts) =>
+        validAccounts.map(validAccount => {
+            addFollowerImportJob(validAccount.id);
+            return validAccount
+        }),
+    addUserInfoExportJob
+);
+
+const importWorker = new Worker<string[], void>('import', async (job) => {
+    await importPipeline(job.data)
+}, { concurrency: 1000 })
 
 
-const importWorker = new Worker<UserName, void>('import', async (job) => {
-    const userNames = job.data.split(',')
-    const usersInfo = await getUsersInfo(userNames)
-
-    const filteredMarshalledUsersInfo = usersInfo
-        .filter(({ followers }) => followers.length > 200)
-        .map(marshallUserInfo)
+importWorker.on('completed', job => {
+    console.log('(import)done: \n' + JSON.stringify(job.data))
+})
 
 
-    const nonExistingUsersInfo = await getNonExistingUsersInfo(filteredMarshalledUsersInfo)
-    const nonExistingUsersNames = nonExistingUsersInfo.map(getUserNameFromMarshalledUserInfo)
-
-    const followerUserNames = usersInfo.filter(({ name }) => nonExistingUsersNames.includes(name)).flatMap(u => u.followers)
-
-    await addUserInfoExportJob(filteredMarshalledUsersInfo.join(','))
-    await addUserImportJob(followerUserNames.join(','))
-
-}, { concurrency: 10 })
-
-const exportWorker = new Worker<string, void>('export', async (job) => {
-    await addToRedisSet(job.data.split(',')) //EXPORT USER INFO
+const exportWorker = new Worker<TwitterUser[], void>('export', async (job) => {
+    const marshalledUsersInfo = job.data.map(marshallUserInfo)
+    const userIds = job.data.map(d => d.id)
+    await addToRedisSet(marshalledUsersInfo, userIds) //EXPORT USER INFO
 }, { concurrency: 1000 })
 
 
 
-async function getUsersInfo(usernames: UserName[]): Promise<UserInfo[]> {
-    return []
+exportWorker.on('completed', job => {
+    console.log('(export)done: \n' + JSON.stringify(job.data))
+})
+
+function removeInvalidAccounts(usersInfo: TwitterUser[]) {
+    return usersInfo
+        .filter(({ public_metrics: { followers_count, following_count, tweet_count }, profile_image_url }) =>
+            following_count >= 100 && followers_count > 5 && tweet_count > 3 && profile_image_url !== 'https://abs.twimg.com/sticky/default_profile_images/default_profile_400x400.png'
+        );
 }
 
-
-function marshallUserInfo({ name, photoUrl, followers }: UserInfo): MarshalledUserInfo {
-    return [name, parsePhotoIdFromPhotoUrl(photoUrl), followers.length].join('\n')
-}
-
-function getUserNameFromMarshalledUserInfo(marshalledUsersInfo: MarshalledUserInfo): string {
-    return marshalledUsersInfo.split('\n')[0]
+function marshallUserInfo({ username, profile_image_url: photoUrl, public_metrics: { followers_count } }: TwitterUser): MarshalledUserInfo {
+    return [username, parsePhotoIdFromPhotoUrl(photoUrl), followers_count].join('\n')
 }
 
 function parsePhotoIdFromPhotoUrl(photoUrl: string): string {
@@ -98,3 +166,8 @@ function parsePhotoIdFromPhotoUrl(photoUrl: string): string {
 
 
 addInitialJob()
+    .then(() => { schedulerQueue.close() })
+    .catch(console.error)
+
+
+    // https://abs.twimg.com/sticky/default_profile_images/default_profile_400x400.png
