@@ -27,7 +27,7 @@ interface TwitterUser {
 
 const getTwitterUsersLimit = pRateLimit({
     interval: 15 * 60 * 1000,
-    rate: 320
+    rate: 500
 })
 
 const getTwitterFollowersLimit = pRateLimit({
@@ -55,7 +55,7 @@ async function getTwitterFollowers(userid: string): Promise<TwitterUser[]> {
             'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAABCINwEAAAAAE84d%2BfYIClOTvkrWajggz6%2FnQEo%3DCFjvHp6J0wnPIQSCA0IF9RLr0aPI4O7MkevqKsiawqJihElwmB'
         }
     }))
-    if (twitterUserResponse.body.errors) throw Error(twitterUserResponse.body.errors)
+    if (!twitterUserResponse.body.data) throw Error(twitterUserResponse.body)
     const twitterUsers = twitterUserResponse.body.data as Array<TwitterUser>
 
     return twitterUsers

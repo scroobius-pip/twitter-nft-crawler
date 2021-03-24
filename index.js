@@ -60,7 +60,7 @@ var followerImportQueue = new bullmq_1.Queue('follower_import');
 var exportQueue = new bullmq_1.Queue('export'); //QUEUE OF MARSHALLED
 var getTwitterUsersLimit = p_ratelimit_1.pRateLimit({
     interval: 15 * 60 * 1000,
-    rate: 320
+    rate: 500
 });
 var getTwitterFollowersLimit = p_ratelimit_1.pRateLimit({
     interval: 15 * 60 * 1000,
@@ -98,8 +98,8 @@ function getTwitterFollowers(userid) {
                     }); })];
                 case 1:
                     twitterUserResponse = _a.sent();
-                    if (twitterUserResponse.body.errors)
-                        throw Error(twitterUserResponse.body.errors);
+                    if (!twitterUserResponse.body.data)
+                        throw Error(twitterUserResponse.body);
                     twitterUsers = twitterUserResponse.body.data;
                     return [2 /*return*/, twitterUsers];
             }
@@ -167,7 +167,7 @@ function addInitialJob() {
     return __awaiter(this, void 0, void 0, function () {
         return __generator(this, function (_a) {
             switch (_a.label) {
-                case 0: return [4 /*yield*/, addUserImportJob(['966309517133676544', '97904826', '323143259', '1169558766359990272'])];
+                case 0: return [4 /*yield*/, addUserImportJob(['813286'])];
                 case 1:
                     _a.sent();
                     return [2 /*return*/];
@@ -195,9 +195,9 @@ var followerImportWorker = new bullmq_1.Worker('follower_import', function (job)
     });
 }); }, { concurrency: 15 });
 var followerImportPipeline = pipe(getTwitterFollowers, removeInvalidAccounts, removeExistingUsers, createUserImportJobs, addUserInfoExportJob);
-followerImportWorker.on('completed', function (job) {
-    console.log("(follower-import) done:" + job.data);
-});
+// followerImportWorker.on('completed', job => {
+//     console.log(`(follower-import) done:${job.data}`)
+// })
 followerImportWorker.on('failed', function (job) {
     console.log("(follower-import) failed: " + job.data + " " + (job.failedReason));
 });
@@ -212,29 +212,37 @@ var importWorker = new bullmq_1.Worker('import', function (job) { return __await
         }
     });
 }); }, { concurrency: 300 });
-importWorker.on('completed', function (job) {
-    console.log("(import) done:" + job.data.length);
-});
+// importWorker.on('completed', job => {
+//     console.log(`(import) done:${job.data.length}`)
+// })
 importWorker.on('failed', function (job) {
     console.log("(import) failed:" + job.failedReason);
 });
 var exportWorker = new bullmq_1.Worker('export', function (job) { return __awaiter(void 0, void 0, void 0, function () {
-    var marshalledUsersInfo, userIds;
+    var marshalledUsersInfo, userIds, error_1;
     return __generator(this, function (_a) {
         switch (_a.label) {
             case 0:
+                _a.trys.push([0, 2, , 3]);
                 marshalledUsersInfo = job.data.map(marshallUserInfo);
                 userIds = job.data.map(function (d) { return d.id; });
                 return [4 /*yield*/, addToRedisSet(marshalledUsersInfo, userIds)];
             case 1:
                 _a.sent();
-                return [2 /*return*/];
+                return [3 /*break*/, 3];
+            case 2:
+                error_1 = _a.sent();
+                if (error_1.message.includes('photo')) {
+                    return [2 /*return*/];
+                }
+                throw error_1;
+            case 3: return [2 /*return*/];
         }
     });
 }); }, { concurrency: 1000 });
-exportWorker.on('completed', function (job) {
-    console.log("(export) done:" + job.data.length);
-});
+// exportWorker.on('completed', job => {
+//     console.log(`(export) done:${job.data.length}`)
+// })
 exportWorker.on('failed', function (_a) {
     var data = _a.data, job = __rest(_a, ["data"]);
     console.log("(export) failed:" + job.failedReason);
