@@ -125,7 +125,7 @@ followerImportWorker.on('completed', job => {
 })
 
 followerImportWorker.on('failed', job => {
-    console.log(`(follower-import) failed:${JSON.stringify(job)}`)
+    console.log(`(follower-import) failed: ${job.data} ${(job.failedReason)}`)
 })
 
 
@@ -146,13 +146,13 @@ importWorker.on('completed', job => {
 })
 
 importWorker.on('failed', job => {
-    console.log(`(import) failed:${JSON.stringify(job)}`)
+    console.log(`(import) failed:${job.failedReason}`)
 })
 
 const exportWorker = new Worker<TwitterUser[], void>('export', async (job) => {
     const marshalledUsersInfo = job.data.map(marshallUserInfo)
     const userIds = job.data.map(d => d.id)
-    await addToRedisSet(marshalledUsersInfo, userIds) //EXPORT USER INFO
+    await addToRedisSet(marshalledUsersInfo, userIds)
 }, { concurrency: 1000 })
 
 
@@ -162,7 +162,7 @@ exportWorker.on('completed', job => {
 })
 
 exportWorker.on('failed', ({ data, ...job }) => {
-    console.log(`(export) failed:${JSON.stringify(job)}`)
+    console.log(`(export) failed:${job.failedReason}`)
 })
 
 function removeInvalidAccounts(usersInfo: TwitterUser[]) {

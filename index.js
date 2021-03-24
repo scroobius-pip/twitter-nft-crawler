@@ -35,6 +35,17 @@ var __generator = (this && this.__generator) || function (thisArg, body) {
         if (op[0] & 5) throw op[1]; return { value: op[0] ? op[1] : void 0, done: true };
     }
 };
+var __rest = (this && this.__rest) || function (s, e) {
+    var t = {};
+    for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p) && e.indexOf(p) < 0)
+        t[p] = s[p];
+    if (s != null && typeof Object.getOwnPropertySymbols === "function")
+        for (var i = 0, p = Object.getOwnPropertySymbols(s); i < p.length; i++) {
+            if (e.indexOf(p[i]) < 0 && Object.prototype.propertyIsEnumerable.call(s, p[i]))
+                t[p[i]] = s[p[i]];
+        }
+    return t;
+};
 exports.__esModule = true;
 var bullmq_1 = require("bullmq");
 var redis = require("ioredis");
@@ -49,11 +60,11 @@ var followerImportQueue = new bullmq_1.Queue('follower_import');
 var exportQueue = new bullmq_1.Queue('export'); //QUEUE OF MARSHALLED
 var getTwitterUsersLimit = p_ratelimit_1.pRateLimit({
     interval: 15 * 60 * 1000,
-    rate: 300
+    rate: 320
 });
 var getTwitterFollowersLimit = p_ratelimit_1.pRateLimit({
     interval: 15 * 60 * 1000,
-    rate: 15
+    rate: 20
 });
 function getTwitterUsers(userIds) {
     return __awaiter(this, void 0, void 0, function () {
@@ -101,11 +112,6 @@ function addToRedisSet(marshalledUsersInfo, userIds) {
         redisClient.sadd('twitterusers', marshalledUsersInfo)
     ]);
 }
-// async function getNonExistingUsersInfo(usersInfo: TwitterUser[]): Promise<TwitterUser[]> {
-//     const marshalledUsersInfo = usersInfo.map(marshallUserInfo)
-//     const result = await (redisClient as any).smismember('twitterusers', marshalledUsersInfo) as number[]
-//     return usersInfo.filter((_, i) => result[i] === 0)
-// }
 function removeExistingUsers(twitterUsers) {
     return __awaiter(this, void 0, void 0, function () {
         var userids, result;
@@ -169,6 +175,15 @@ function addInitialJob() {
         });
     });
 }
+var createUserImportJobs = function (validAccounts) {
+    var userIds = validAccounts.map(function (a) { return a.id; });
+    chunk(userIds, 100).forEach(addUserImportJob);
+    return validAccounts;
+};
+var createFollowerImportJobs = function (validAccounts) { return validAccounts.map(function (validAccount) {
+    addFollowerImportJob(validAccount.id);
+    return validAccount;
+}); };
 var followerImportWorker = new bullmq_1.Worker('follower_import', function (job) { return __awaiter(void 0, void 0, void 0, function () {
     return __generator(this, function (_a) {
         switch (_a.label) {
@@ -179,19 +194,13 @@ var followerImportWorker = new bullmq_1.Worker('follower_import', function (job)
         }
     });
 }); }, { concurrency: 15 });
-var createUserImportJobs = function (validAccounts) {
-    var userIds = validAccounts.map(function (a) { return a.id; });
-    chunk(userIds, 100).forEach(addUserImportJob);
-    return validAccounts;
-};
 var followerImportPipeline = pipe(getTwitterFollowers, removeInvalidAccounts, removeExistingUsers, createUserImportJobs, addUserInfoExportJob);
 followerImportWorker.on('completed', function (job) {
-    console.log('(follower-import)done: \n' + JSON.stringify(job.data));
+    console.log("(follower-import) done:" + job.data);
 });
-var createFollowerImportJobs = function (validAccounts) { return validAccounts.map(function (validAccount) {
-    addFollowerImportJob(validAccount.id);
-    return validAccount;
-}); };
+followerImportWorker.on('failed', function (job) {
+    console.log("(follower-import) failed: " + job.data + " " + (job.failedReason));
+});
 var importPipeline = pipe(getTwitterUsers, createFollowerImportJobs, removeInvalidAccounts, addUserInfoExportJob);
 var importWorker = new bullmq_1.Worker('import', function (job) { return __awaiter(void 0, void 0, void 0, function () {
     return __generator(this, function (_a) {
@@ -204,7 +213,10 @@ var importWorker = new bullmq_1.Worker('import', function (job) { return __await
     });
 }); }, { concurrency: 300 });
 importWorker.on('completed', function (job) {
-    console.log('(import)done: \n' + JSON.stringify(job.data));
+    console.log("(import) done:" + job.data.length);
+});
+importWorker.on('failed', function (job) {
+    console.log("(import) failed:" + job.failedReason);
 });
 var exportWorker = new bullmq_1.Worker('export', function (job) { return __awaiter(void 0, void 0, void 0, function () {
     var marshalledUsersInfo, userIds;
@@ -213,15 +225,19 @@ var exportWorker = new bullmq_1.Worker('export', function (job) { return __await
             case 0:
                 marshalledUsersInfo = job.data.map(marshallUserInfo);
                 userIds = job.data.map(function (d) { return d.id; });
-                return [4 /*yield*/, addToRedisSet(marshalledUsersInfo, userIds)]; //EXPORT USER INFO
+                return [4 /*yield*/, addToRedisSet(marshalledUsersInfo, userIds)];
             case 1:
-                _a.sent(); //EXPORT USER INFO
+                _a.sent();
                 return [2 /*return*/];
         }
     });
 }); }, { concurrency: 1000 });
 exportWorker.on('completed', function (job) {
-    console.log('(export)done: \n' + JSON.stringify(job.data));
+    console.log("(export) done:" + job.data.length);
+});
+exportWorker.on('failed', function (_a) {
+    var data = _a.data, job = __rest(_a, ["data"]);
+    console.log("(export) failed:" + job.failedReason);
 });
 function removeInvalidAccounts(usersInfo) {
     return usersInfo
