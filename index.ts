@@ -25,25 +25,36 @@ interface TwitterUser {
     }
 }
 
+const getTwitterUsersLimit = pRateLimit({
+    interval: 15 * 60 * 1000,
+    rate: 320
+})
+
+const getTwitterFollowersLimit = pRateLimit({
+    interval: 15 * 60 * 1000,
+    rate: 20
+})
 
 async function getTwitterUsers(userIds: string[]): Promise<TwitterUser[]> {
-    const twitterUserResponse = await needle('get', `https://api.twitter.com/2/users?ids=${userIds.join(',')}&user.fields=profile_image_url,public_metrics`, {
+
+    const twitterUserResponse = await getTwitterUsersLimit(() => needle('get', `https://api.twitter.com/2/users?ids=${userIds.join(',')}&user.fields=profile_image_url,public_metrics`, {
         headers: {
             'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAABCINwEAAAAAE84d%2BfYIClOTvkrWajggz6%2FnQEo%3DCFjvHp6J0wnPIQSCA0IF9RLr0aPI4O7MkevqKsiawqJihElwmB'
         }
-    })
+    }))
+
     if (twitterUserResponse.body.errors) throw Error(twitterUserResponse.body.errors)
     const twitterUsers = twitterUserResponse.body.data as Array<TwitterUser>
 
     return twitterUsers
 }
 
-async function getTwitterUserFollowers(userid: string): Promise<TwitterUser[]> {
-    const twitterUserResponse = await needle('get', `https://api.twitter.com/2/users/${userid}/following?user.fields=profile_image_url,created_at,public_metrics&max_results=1000`, {
+async function getTwitterFollowers(userid: string): Promise<TwitterUser[]> {
+    const twitterUserResponse = await getTwitterFollowersLimit(() => needle('get', `https://api.twitter.com/2/users/${userid}/following?user.fields=profile_image_url,created_at,public_metrics&max_results=1000`, {
         headers: {
             'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAABCINwEAAAAAE84d%2BfYIClOTvkrWajggz6%2FnQEo%3DCFjvHp6J0wnPIQSCA0IF9RLr0aPI4O7MkevqKsiawqJihElwmB'
         }
-    })
+    }))
     if (twitterUserResponse.body.errors) throw Error(twitterUserResponse.body.errors)
     const twitterUsers = twitterUserResponse.body.data as Array<TwitterUser>
 
@@ -58,17 +69,11 @@ function addToRedisSet(marshalledUsersInfo: MarshalledUserInfo[], userIds: strin
     ])
 }
 
-// async function getNonExistingUsersInfo(usersInfo: TwitterUser[]): Promise<TwitterUser[]> {
-//     const marshalledUsersInfo = usersInfo.map(marshallUserInfo)
-//     const result = await (redisClient as any).smismember('twitterusers', marshalledUsersInfo) as number[]
-//     return usersInfo.filter((_, i) => result[i] === 0)
-// }
-
-
-// async function getNonExistingUserIds(userids: string[]): Promise<string[]> {
-//     const result = await (redisClient as any).exists(userids) as number[]
-//     return userids.filter((_, i) => result[i] === 0)
-// }
+async function removeExistingUsers(twitterUsers: TwitterUser[]): Promise<TwitterUser[]> {
+    const userids = twitterUsers.map(t => t.id)
+    const result = await (redisClient as any).smismember('twitterIds', userids) as number[]
+    return twitterUsers.filter((_, i) => result[i] === 0)
+}
 
 type MarshalledUserInfo = string
 
@@ -88,48 +93,61 @@ async function addUserInfoExportJob(usersInfo: TwitterUser[]) {
 
 
 async function addInitialJob() {
-    await addUserImportJob(['1364516985963352065', '1016872927373844482', '78941384'])
+    await addUserImportJob(['966309517133676544', '97904826', '323143259', '1169558766359990272'])
 }
 
+const createUserImportJobs = (validAccounts: TwitterUser[]): TwitterUser[] => {
+    const userIds = validAccounts.map(a => a.id);
+    chunk(userIds, 100).forEach(addUserImportJob);
+    return validAccounts;
+};
+
+const createFollowerImportJobs = (validAccounts: TwitterUser[]): TwitterUser[] => validAccounts.map(validAccount => {
+    addFollowerImportJob(validAccount.id);
+    return validAccount;
+});
 
 const followerImportWorker = new Worker<string, void>('follower_import', async (job) => {
     await followerImportPipeline(job.data)
-}, { concurrency: 1000 })
+}, { concurrency: 15 })
+
 
 const followerImportPipeline = pipe(
-    getTwitterUserFollowers,
+    getTwitterFollowers,
     removeInvalidAccounts,
-    (validAccounts) => {
-        const userIds = validAccounts.map(a => a.id)
-        chunk(userIds, 100).forEach(addUserImportJob)
-        return validAccounts
-    },
+    removeExistingUsers,
+    createUserImportJobs,
     addUserInfoExportJob)
 
+
 followerImportWorker.on('completed', job => {
-    console.log('(follower-import)done: \n' + JSON.stringify(job.data))
+    console.log(`(follower-import) done:${job.data}`)
 })
+
+followerImportWorker.on('failed', job => {
+    console.log(`(follower-import) failed:${JSON.stringify(job)}`)
+})
+
 
 const importPipeline = pipe(
     getTwitterUsers,
+    createFollowerImportJobs,
     removeInvalidAccounts,
-    (validAccounts) =>
-        validAccounts.map(validAccount => {
-            addFollowerImportJob(validAccount.id);
-            return validAccount
-        }),
     addUserInfoExportJob
 );
 
 const importWorker = new Worker<string[], void>('import', async (job) => {
     await importPipeline(job.data)
-}, { concurrency: 1000 })
+}, { concurrency: 300 })
 
 
 importWorker.on('completed', job => {
-    console.log('(import)done: \n' + JSON.stringify(job.data))
+    console.log(`(import) done:${job.data.length}`)
 })
 
+importWorker.on('failed', job => {
+    console.log(`(import) failed:${JSON.stringify(job)}`)
+})
 
 const exportWorker = new Worker<TwitterUser[], void>('export', async (job) => {
     const marshalledUsersInfo = job.data.map(marshallUserInfo)
@@ -140,7 +158,11 @@ const exportWorker = new Worker<TwitterUser[], void>('export', async (job) => {
 
 
 exportWorker.on('completed', job => {
-    console.log('(export)done: \n' + JSON.stringify(job.data))
+    console.log(`(export) done:${job.data.length}`)
+})
+
+exportWorker.on('failed', ({ data, ...job }) => {
+    console.log(`(export) failed:${JSON.stringify(job)}`)
 })
 
 function removeInvalidAccounts(usersInfo: TwitterUser[]) {

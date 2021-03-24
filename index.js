@@ -37,48 +37,212 @@ var __generator = (this && this.__generator) || function (thisArg, body) {
 };
 exports.__esModule = true;
 var bullmq_1 = require("bullmq");
-var queue = new bullmq_1.Queue('twitter');
-function addInitialJob() {
+var redis = require("ioredis");
+var needle = require("needle");
+var chunk = require("chunk");
+var p_ratelimit_1 = require("p-ratelimit");
+var pipe = require("p-pipe");
+var redisClient = new redis('ec2-3-236-123-111.compute-1.amazonaws.com', { enableAutoPipelining: true });
+var schedulerQueue = new bullmq_1.QueueScheduler('scheduler');
+var importQueue = new bullmq_1.Queue('import');
+var followerImportQueue = new bullmq_1.Queue('follower_import');
+var exportQueue = new bullmq_1.Queue('export'); //QUEUE OF MARSHALLED
+var getTwitterUsersLimit = p_ratelimit_1.pRateLimit({
+    interval: 15 * 60 * 1000,
+    rate: 300
+});
+var getTwitterFollowersLimit = p_ratelimit_1.pRateLimit({
+    interval: 15 * 60 * 1000,
+    rate: 15
+});
+function getTwitterUsers(userIds) {
+    return __awaiter(this, void 0, void 0, function () {
+        var twitterUserResponse, twitterUsers;
+        return __generator(this, function (_a) {
+            switch (_a.label) {
+                case 0: return [4 /*yield*/, getTwitterUsersLimit(function () { return needle('get', "https://api.twitter.com/2/users?ids=" + userIds.join(',') + "&user.fields=profile_image_url,public_metrics", {
+                        headers: {
+                            'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAABCINwEAAAAAE84d%2BfYIClOTvkrWajggz6%2FnQEo%3DCFjvHp6J0wnPIQSCA0IF9RLr0aPI4O7MkevqKsiawqJihElwmB'
+                        }
+                    }); })];
+                case 1:
+                    twitterUserResponse = _a.sent();
+                    if (twitterUserResponse.body.errors)
+                        throw Error(twitterUserResponse.body.errors);
+                    twitterUsers = twitterUserResponse.body.data;
+                    return [2 /*return*/, twitterUsers];
+            }
+        });
+    });
+}
+function getTwitterFollowers(userid) {
+    return __awaiter(this, void 0, void 0, function () {
+        var twitterUserResponse, twitterUsers;
+        return __generator(this, function (_a) {
+            switch (_a.label) {
+                case 0: return [4 /*yield*/, getTwitterFollowersLimit(function () { return needle('get', "https://api.twitter.com/2/users/" + userid + "/following?user.fields=profile_image_url,created_at,public_metrics&max_results=1000", {
+                        headers: {
+                            'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAABCINwEAAAAAE84d%2BfYIClOTvkrWajggz6%2FnQEo%3DCFjvHp6J0wnPIQSCA0IF9RLr0aPI4O7MkevqKsiawqJihElwmB'
+                        }
+                    }); })];
+                case 1:
+                    twitterUserResponse = _a.sent();
+                    if (twitterUserResponse.body.errors)
+                        throw Error(twitterUserResponse.body.errors);
+                    twitterUsers = twitterUserResponse.body.data;
+                    return [2 /*return*/, twitterUsers];
+            }
+        });
+    });
+}
+function addToRedisSet(marshalledUsersInfo, userIds) {
+    return Promise.all([
+        redisClient.sadd('twitterIds', userIds),
+        redisClient.sadd('twitterusers', marshalledUsersInfo)
+    ]);
+}
+// async function getNonExistingUsersInfo(usersInfo: TwitterUser[]): Promise<TwitterUser[]> {
+//     const marshalledUsersInfo = usersInfo.map(marshallUserInfo)
+//     const result = await (redisClient as any).smismember('twitterusers', marshalledUsersInfo) as number[]
+//     return usersInfo.filter((_, i) => result[i] === 0)
+// }
+function removeExistingUsers(twitterUsers) {
+    return __awaiter(this, void 0, void 0, function () {
+        var userids, result;
+        return __generator(this, function (_a) {
+            switch (_a.label) {
+                case 0:
+                    userids = twitterUsers.map(function (t) { return t.id; });
+                    return [4 /*yield*/, redisClient.smismember('twitterIds', userids)];
+                case 1:
+                    result = _a.sent();
+                    return [2 /*return*/, twitterUsers.filter(function (_, i) { return result[i] === 0; })];
+            }
+        });
+    });
+}
+function addFollowerImportJob(id) {
     return __awaiter(this, void 0, void 0, function () {
         return __generator(this, function (_a) {
             switch (_a.label) {
-                case 0: return [4 /*yield*/, queue.add('import', 'simdi_jinkins', { removeOnFail: 1000 })];
+                case 0: return [4 /*yield*/, followerImportQueue.add('follower_import', id, { attempts: 20, backoff: { type: 'exponential', delay: 1000 } })];
                 case 1:
-                    _a.sent();
-                    return [4 /*yield*/, queue.add('export', 'simdi_jinkins\n1195946508006412293/ZKddKyho', { removeOnFail: 1000 })];
-                case 2:
                     _a.sent();
                     return [2 /*return*/];
             }
         });
     });
 }
+function addUserImportJob(userids) {
+    return __awaiter(this, void 0, void 0, function () {
+        return __generator(this, function (_a) {
+            switch (_a.label) {
+                case 0: return [4 /*yield*/, importQueue.add('import', userids, { attempts: 20, backoff: { type: 'exponential', delay: 1000 } })];
+                case 1:
+                    _a.sent();
+                    return [2 /*return*/];
+            }
+        });
+    });
+}
+function addUserInfoExportJob(usersInfo) {
+    return __awaiter(this, void 0, void 0, function () {
+        return __generator(this, function (_a) {
+            switch (_a.label) {
+                case 0: return [4 /*yield*/, exportQueue.add('export', usersInfo, { attempts: 50, backoff: { type: 'exponential', delay: 100 } })];
+                case 1:
+                    _a.sent();
+                    return [2 /*return*/];
+            }
+        });
+    });
+}
+function addInitialJob() {
+    return __awaiter(this, void 0, void 0, function () {
+        return __generator(this, function (_a) {
+            switch (_a.label) {
+                case 0: return [4 /*yield*/, addUserImportJob(['966309517133676544', '97904826', '323143259', '1169558766359990272'])];
+                case 1:
+                    _a.sent();
+                    return [2 /*return*/];
+            }
+        });
+    });
+}
+var followerImportWorker = new bullmq_1.Worker('follower_import', function (job) { return __awaiter(void 0, void 0, void 0, function () {
+    return __generator(this, function (_a) {
+        switch (_a.label) {
+            case 0: return [4 /*yield*/, followerImportPipeline(job.data)];
+            case 1:
+                _a.sent();
+                return [2 /*return*/];
+        }
+    });
+}); }, { concurrency: 15 });
+var createUserImportJobs = function (validAccounts) {
+    var userIds = validAccounts.map(function (a) { return a.id; });
+    chunk(userIds, 100).forEach(addUserImportJob);
+    return validAccounts;
+};
+var followerImportPipeline = pipe(getTwitterFollowers, removeInvalidAccounts, removeExistingUsers, createUserImportJobs, addUserInfoExportJob);
+followerImportWorker.on('completed', function (job) {
+    console.log('(follower-import)done: \n' + JSON.stringify(job.data));
+});
+var createFollowerImportJobs = function (validAccounts) { return validAccounts.map(function (validAccount) {
+    addFollowerImportJob(validAccount.id);
+    return validAccount;
+}); };
+var importPipeline = pipe(getTwitterUsers, createFollowerImportJobs, removeInvalidAccounts, addUserInfoExportJob);
 var importWorker = new bullmq_1.Worker('import', function (job) { return __awaiter(void 0, void 0, void 0, function () {
     return __generator(this, function (_a) {
-        console.log(job.data);
-        return [2 /*return*/, ''];
+        switch (_a.label) {
+            case 0: return [4 /*yield*/, importPipeline(job.data)];
+            case 1:
+                _a.sent();
+                return [2 /*return*/];
+        }
     });
-}); }, { concurrency: 10 });
-var exportWorker = new bullmq_1.Worker('export', function (job) { return __awaiter(void 0, void 0, void 0, function () {
-    return __generator(this, function (_a) {
-        console.log(job.data);
-        return [2 /*return*/, ''];
-    });
-}); }, { concurrency: 100 });
+}); }, { concurrency: 300 });
 importWorker.on('completed', function (job) {
-    console.log(job + " completed");
+    console.log('(import)done: \n' + JSON.stringify(job.data));
 });
-exportWorker.on('completed', function (job, returnValue) {
-    console.log(job + " completed");
+var exportWorker = new bullmq_1.Worker('export', function (job) { return __awaiter(void 0, void 0, void 0, function () {
+    var marshalledUsersInfo, userIds;
+    return __generator(this, function (_a) {
+        switch (_a.label) {
+            case 0:
+                marshalledUsersInfo = job.data.map(marshallUserInfo);
+                userIds = job.data.map(function (d) { return d.id; });
+                return [4 /*yield*/, addToRedisSet(marshalledUsersInfo, userIds)]; //EXPORT USER INFO
+            case 1:
+                _a.sent(); //EXPORT USER INFO
+                return [2 /*return*/];
+        }
+    });
+}); }, { concurrency: 1000 });
+exportWorker.on('completed', function (job) {
+    console.log('(export)done: \n' + JSON.stringify(job.data));
 });
-// function userNameExists(userName: string): Promise<Boolean> {
-// }
-// function exportUserInfo(): Promise<Boolean> {
-// }
-// function marshallUserInfo(name: string, photoId: string): string {
-//     return name + '\n' + photoId
-// }
-// function parsePhotoIdFromPhotoUrl(photoUrl): string {
-//     return ''
-// }
-addInitialJob();
+function removeInvalidAccounts(usersInfo) {
+    return usersInfo
+        .filter(function (_a) {
+        var _b = _a.public_metrics, followers_count = _b.followers_count, following_count = _b.following_count, tweet_count = _b.tweet_count, profile_image_url = _a.profile_image_url;
+        return following_count >= 100 && followers_count > 5 && tweet_count > 3 && profile_image_url !== 'https://abs.twimg.com/sticky/default_profile_images/default_profile_400x400.png';
+    });
+}
+function marshallUserInfo(_a) {
+    var username = _a.username, photoUrl = _a.profile_image_url, followers_count = _a.public_metrics.followers_count;
+    return [username, parsePhotoIdFromPhotoUrl(photoUrl), followers_count].join('\n');
+}
+function parsePhotoIdFromPhotoUrl(photoUrl) {
+    try {
+        var regex = /(?:s\/)(.*)(?:_)/;
+        return regex.exec(photoUrl)[1];
+    }
+    catch (error) {
+        throw Error('Could not get photo id from url:' + photoUrl);
+    }
+}
+addInitialJob()
+    .then(function () { schedulerQueue.close(); })["catch"](console.error);
+// https://abs.twimg.com/sticky/default_profile_images/default_profile_400x400.png
