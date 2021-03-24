@@ -93,7 +93,7 @@ async function addUserInfoExportJob(usersInfo: TwitterUser[]) {
 
 
 async function addInitialJob() {
-    await addUserImportJob(['966309517133676544', '97904826', '323143259', '1169558766359990272'])
+    await addUserImportJob(['813286'])
 }
 
 const createUserImportJobs = (validAccounts: TwitterUser[]): TwitterUser[] => {
@@ -120,9 +120,9 @@ const followerImportPipeline = pipe(
     addUserInfoExportJob)
 
 
-followerImportWorker.on('completed', job => {
-    console.log(`(follower-import) done:${job.data}`)
-})
+// followerImportWorker.on('completed', job => {
+//     console.log(`(follower-import) done:${job.data}`)
+// })
 
 followerImportWorker.on('failed', job => {
     console.log(`(follower-import) failed: ${job.data} ${(job.failedReason)}`)
@@ -141,25 +141,33 @@ const importWorker = new Worker<string[], void>('import', async (job) => {
 }, { concurrency: 300 })
 
 
-importWorker.on('completed', job => {
-    console.log(`(import) done:${job.data.length}`)
-})
+// importWorker.on('completed', job => {
+//     console.log(`(import) done:${job.data.length}`)
+// })
 
 importWorker.on('failed', job => {
     console.log(`(import) failed:${job.failedReason}`)
 })
 
 const exportWorker = new Worker<TwitterUser[], void>('export', async (job) => {
-    const marshalledUsersInfo = job.data.map(marshallUserInfo)
-    const userIds = job.data.map(d => d.id)
-    await addToRedisSet(marshalledUsersInfo, userIds)
+    try {
+        const marshalledUsersInfo = job.data.map(marshallUserInfo)
+        const userIds = job.data.map(d => d.id)
+        await addToRedisSet(marshalledUsersInfo, userIds)
+    } catch (error) {
+        if (error.message.includes('photo')) {
+
+            return
+        }
+        throw error
+    }
 }, { concurrency: 1000 })
 
 
 
-exportWorker.on('completed', job => {
-    console.log(`(export) done:${job.data.length}`)
-})
+// exportWorker.on('completed', job => {
+//     console.log(`(export) done:${job.data.length}`)
+// })
 
 exportWorker.on('failed', ({ data, ...job }) => {
     console.log(`(export) failed:${job.failedReason}`)
