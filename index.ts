@@ -63,10 +63,14 @@ async function getTwitterFollowers(userid: string): Promise<TwitterUser[]> {
 
 
 function addToRedisSet(marshalledUsersInfo: MarshalledUserInfo[], userIds: string[]): Promise<[number, number]> {
+    if (!userIds.length) return
+
     return Promise.all([
         redisClient.sadd('twitterIds', userIds),
         redisClient.sadd('twitterusers', marshalledUsersInfo)
     ])
+
+
 }
 
 async function removeExistingUsers(twitterUsers: TwitterUser[]): Promise<TwitterUser[]> {
@@ -125,7 +129,7 @@ const followerImportPipeline = pipe(
 // })
 
 followerImportWorker.on('failed', job => {
-    console.log(`(follower-import) failed: ${job.data} ${(job.failedReason)}`)
+    console.error(`(follower-import) failed: ${job.data} ${JSON.stringify(job.failedReason)}`)
 })
 
 
@@ -146,7 +150,7 @@ const importWorker = new Worker<string[], void>('import', async (job) => {
 // })
 
 importWorker.on('failed', job => {
-    console.log(`(import) failed:${job.failedReason}`)
+    console.error(`(import) failed:${JSON.stringify(job.failedReason)}`)
 })
 
 const exportWorker = new Worker<TwitterUser[], void>('export', async (job) => {
@@ -156,9 +160,10 @@ const exportWorker = new Worker<TwitterUser[], void>('export', async (job) => {
         await addToRedisSet(marshalledUsersInfo, userIds)
     } catch (error) {
         if (error.message.includes('photo')) {
-
             return
         }
+
+        console.error(error)
         throw error
     }
 }, { concurrency: 1000 })
@@ -170,7 +175,7 @@ const exportWorker = new Worker<TwitterUser[], void>('export', async (job) => {
 // })
 
 exportWorker.on('failed', ({ data, ...job }) => {
-    console.log(`(export) failed:${job.failedReason}`)
+    console.log(`(export) failed: ${job.reasonFailed} ${JSON.stringify(data)}`)
 })
 
 function removeInvalidAccounts(usersInfo: TwitterUser[]) {

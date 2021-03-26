@@ -199,7 +199,7 @@ var followerImportPipeline = pipe(getTwitterFollowers, removeInvalidAccounts, re
 //     console.log(`(follower-import) done:${job.data}`)
 // })
 followerImportWorker.on('failed', function (job) {
-    console.log("(follower-import) failed: " + job.data + " " + (job.failedReason));
+    console.log("(follower-import) failed: " + job.data + " " + JSON.stringify(job.failedReason));
 });
 var importPipeline = pipe(getTwitterUsers, createFollowerImportJobs, removeInvalidAccounts, addUserInfoExportJob);
 var importWorker = new bullmq_1.Worker('import', function (job) { return __awaiter(void 0, void 0, void 0, function () {
@@ -216,7 +216,7 @@ var importWorker = new bullmq_1.Worker('import', function (job) { return __await
 //     console.log(`(import) done:${job.data.length}`)
 // })
 importWorker.on('failed', function (job) {
-    console.log("(import) failed:" + job.failedReason);
+    console.log("(import) failed:" + JSON.stringify(job.failedReason));
 });
 var exportWorker = new bullmq_1.Worker('export', function (job) { return __awaiter(void 0, void 0, void 0, function () {
     var marshalledUsersInfo, userIds, error_1;
