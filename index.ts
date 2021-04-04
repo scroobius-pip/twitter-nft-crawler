@@ -7,11 +7,13 @@ import pipe = require('p-pipe')
 
 const redisClient = new redis('ec2-3-236-123-111.compute-1.amazonaws.com', { enableAutoPipelining: true })
 
-const schedulerQueue = new QueueScheduler('scheduler')
+const queueSchedulers = [new QueueScheduler('import',), new QueueScheduler('follower_import'), new QueueScheduler('export')]
 
-const importQueue = new Queue('import')
-const followerImportQueue = new Queue('follower_import')
-const exportQueue = new Queue('export') //QUEUE OF MARSHALLED
+const queueOptions = { defaultJobOptions: { removeOnComplete: true } }
+
+const importQueue = new Queue('import', queueOptions)
+const followerImportQueue = new Queue('follower_import', queueOptions)
+const exportQueue = new Queue('export', queueOptions) //QUEUE OF MARSHALLED
 
 
 interface TwitterUser {
@@ -92,12 +94,19 @@ async function addUserImportJob(userids: string[]) {
 }
 
 async function addUserInfoExportJob(usersInfo: TwitterUser[]) {
-    await exportQueue.add('export', usersInfo, { attempts: 50, backoff: { type: 'exponential', delay: 100 } })
+    await exportQueue.add('export', usersInfo, { attempts: 500, backoff: { type: 'linear', delay: 10 } })
 }
 
 
 async function addInitialJob() {
-    await addUserImportJob(['813286'])
+    // await addUserImportJob(['813286'])
+    const jobs = await exportQueue.getJobs(["active", "waiting", "delayed", "complete", "completed"])
+    for await (const job of jobs) {
+
+        const state = await job.getState()
+        console.log(state)
+    }
+
 }
 
 const createUserImportJobs = (validAccounts: TwitterUser[]): TwitterUser[] => {
@@ -124,12 +133,12 @@ const followerImportPipeline = pipe(
     addUserInfoExportJob)
 
 
-// followerImportWorker.on('completed', job => {
-//     console.log(`(follower-import) done:${job.data}`)
-// })
+followerImportWorker.on('completed', job => {
+    console.log(`(follower-import) done:${job.id}`)
+})
 
-followerImportWorker.on('failed', job => {
-    console.error(`(follower-import) failed: ${job.data} ${JSON.stringify(job.failedReason)}`)
+followerImportWorker.on('failed', (job: Job) => {
+    console.error(`(follower-import) failed: ${job.id} ${job.data} ${JSON.stringify(job.failedReason)}`)
 })
 
 
@@ -145,12 +154,12 @@ const importWorker = new Worker<string[], void>('import', async (job) => {
 }, { concurrency: 300 })
 
 
-// importWorker.on('completed', job => {
-//     console.log(`(import) done:${job.data.length}`)
-// })
+importWorker.on('completed', job => {
+    console.log(`(import) done: ${job.id}`)
+})
 
 importWorker.on('failed', job => {
-    console.error(`(import) failed:${JSON.stringify(job.failedReason)}`)
+    console.error(`(import) failed: ${job.id} ${JSON.stringify(job.data)} ${JSON.stringify(job.failedReason)}`)
 })
 
 const exportWorker = new Worker<TwitterUser[], void>('export', async (job) => {
@@ -159,23 +168,23 @@ const exportWorker = new Worker<TwitterUser[], void>('export', async (job) => {
         const userIds = job.data.map(d => d.id)
         await addToRedisSet(marshalledUsersInfo, userIds)
     } catch (error) {
+        console.error(error)
         if (error.message.includes('photo')) {
             return
         }
 
-        console.error(error)
         throw error
     }
 }, { concurrency: 1000 })
 
 
 
-// exportWorker.on('completed', job => {
-//     console.log(`(export) done:${job.data.length}`)
-// })
+exportWorker.on('completed', job => {
+    console.log(`(export) done:${job.id}`)
+})
 
 exportWorker.on('failed', ({ data, ...job }) => {
-    console.log(`(export) failed: ${job.reasonFailed} ${JSON.stringify(data)}`)
+    console.error(`(export) failed: ${job.reasonFailed} ${JSON.stringify(data)}`)
 })
 
 function removeInvalidAccounts(usersInfo: TwitterUser[]) {
@@ -201,7 +210,7 @@ function parsePhotoIdFromPhotoUrl(photoUrl: string): string {
 
 
 addInitialJob()
-    .then(() => { schedulerQueue.close() })
+    .then(() => { queueSchedulers.forEach(s => s.close()) })
     .catch(console.error)
 
 

@@ -35,6 +35,13 @@ var __generator = (this && this.__generator) || function (thisArg, body) {
         if (op[0] & 5) throw op[1]; return { value: op[0] ? op[1] : void 0, done: true };
     }
 };
+var __asyncValues = (this && this.__asyncValues) || function (o) {
+    if (!Symbol.asyncIterator) throw new TypeError("Symbol.asyncIterator is not defined.");
+    var m = o[Symbol.asyncIterator], i;
+    return m ? m.call(o) : (o = typeof __values === "function" ? __values(o) : o[Symbol.iterator](), i = {}, verb("next"), verb("throw"), verb("return"), i[Symbol.asyncIterator] = function () { return this; }, i);
+    function verb(n) { i[n] = o[n] && function (v) { return new Promise(function (resolve, reject) { v = o[n](v), settle(resolve, reject, v.done, v.value); }); }; }
+    function settle(resolve, reject, d, v) { Promise.resolve(v).then(function(v) { resolve({ value: v, done: d }); }, reject); }
+};
 var __rest = (this && this.__rest) || function (s, e) {
     var t = {};
     for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p) && e.indexOf(p) < 0)
@@ -54,10 +61,11 @@ var chunk = require("chunk");
 var p_ratelimit_1 = require("p-ratelimit");
 var pipe = require("p-pipe");
 var redisClient = new redis('ec2-3-236-123-111.compute-1.amazonaws.com', { enableAutoPipelining: true });
-var schedulerQueue = new bullmq_1.QueueScheduler('scheduler');
-var importQueue = new bullmq_1.Queue('import');
-var followerImportQueue = new bullmq_1.Queue('follower_import');
-var exportQueue = new bullmq_1.Queue('export'); //QUEUE OF MARSHALLED
+var queueSchedulers = [new bullmq_1.QueueScheduler('import'), new bullmq_1.QueueScheduler('follower_import'), new bullmq_1.QueueScheduler('export')];
+var queueOptions = { defaultJobOptions: { removeOnComplete: true } };
+var importQueue = new bullmq_1.Queue('import', queueOptions);
+var followerImportQueue = new bullmq_1.Queue('follower_import', queueOptions);
+var exportQueue = new bullmq_1.Queue('export', queueOptions); //QUEUE OF MARSHALLED
 var getTwitterUsersLimit = p_ratelimit_1.pRateLimit({
     interval: 15 * 60 * 1000,
     rate: 500
@@ -107,6 +115,8 @@ function getTwitterFollowers(userid) {
     });
 }
 function addToRedisSet(marshalledUsersInfo, userIds) {
+    if (!userIds.length)
+        return;
     return Promise.all([
         redisClient.sadd('twitterIds', userIds),
         redisClient.sadd('twitterusers', marshalledUsersInfo)
@@ -155,7 +165,7 @@ function addUserInfoExportJob(usersInfo) {
     return __awaiter(this, void 0, void 0, function () {
         return __generator(this, function (_a) {
             switch (_a.label) {
-                case 0: return [4 /*yield*/, exportQueue.add('export', usersInfo, { attempts: 50, backoff: { type: 'exponential', delay: 100 } })];
+                case 0: return [4 /*yield*/, exportQueue.add('export', usersInfo, { attempts: 500, backoff: { type: 'linear', delay: 10 } })];
                 case 1:
                     _a.sent();
                     return [2 /*return*/];
@@ -164,13 +174,47 @@ function addUserInfoExportJob(usersInfo) {
     });
 }
 function addInitialJob() {
+    var e_1, _a;
     return __awaiter(this, void 0, void 0, function () {
-        return __generator(this, function (_a) {
-            switch (_a.label) {
-                case 0: return [4 /*yield*/, addUserImportJob(['813286'])];
+        var jobs, jobs_1, jobs_1_1, job, state, e_1_1;
+        return __generator(this, function (_b) {
+            switch (_b.label) {
+                case 0: return [4 /*yield*/, exportQueue.getJobs(["active", "waiting", "delayed", "complete", "completed"])];
                 case 1:
-                    _a.sent();
-                    return [2 /*return*/];
+                    jobs = _b.sent();
+                    _b.label = 2;
+                case 2:
+                    _b.trys.push([2, 8, 9, 14]);
+                    jobs_1 = __asyncValues(jobs);
+                    _b.label = 3;
+                case 3: return [4 /*yield*/, jobs_1.next()];
+                case 4:
+                    if (!(jobs_1_1 = _b.sent(), !jobs_1_1.done)) return [3 /*break*/, 7];
+                    job = jobs_1_1.value;
+                    return [4 /*yield*/, job.getState()];
+                case 5:
+                    state = _b.sent();
+                    console.log(state);
+                    _b.label = 6;
+                case 6: return [3 /*break*/, 3];
+                case 7: return [3 /*break*/, 14];
+                case 8:
+                    e_1_1 = _b.sent();
+                    e_1 = { error: e_1_1 };
+                    return [3 /*break*/, 14];
+                case 9:
+                    _b.trys.push([9, , 12, 13]);
+                    if (!(jobs_1_1 && !jobs_1_1.done && (_a = jobs_1["return"]))) return [3 /*break*/, 11];
+                    return [4 /*yield*/, _a.call(jobs_1)];
+                case 10:
+                    _b.sent();
+                    _b.label = 11;
+                case 11: return [3 /*break*/, 13];
+                case 12:
+                    if (e_1) throw e_1.error;
+                    return [7 /*endfinally*/];
+                case 13: return [7 /*endfinally*/];
+                case 14: return [2 /*return*/];
             }
         });
     });
@@ -195,11 +239,11 @@ var followerImportWorker = new bullmq_1.Worker('follower_import', function (job)
     });
 }); }, { concurrency: 15 });
 var followerImportPipeline = pipe(getTwitterFollowers, removeInvalidAccounts, removeExistingUsers, createUserImportJobs, addUserInfoExportJob);
-// followerImportWorker.on('completed', job => {
-//     console.log(`(follower-import) done:${job.data}`)
-// })
+followerImportWorker.on('completed', function (job) {
+    console.log("(follower-import) done:" + job.id);
+});
 followerImportWorker.on('failed', function (job) {
-    console.log("(follower-import) failed: " + job.data + " " + JSON.stringify(job.failedReason));
+    console.error("(follower-import) failed: " + job.id + " " + job.data + " " + JSON.stringify(job.failedReason));
 });
 var importPipeline = pipe(getTwitterUsers, createFollowerImportJobs, removeInvalidAccounts, addUserInfoExportJob);
 var importWorker = new bullmq_1.Worker('import', function (job) { return __awaiter(void 0, void 0, void 0, function () {
@@ -212,11 +256,11 @@ var importWorker = new bullmq_1.Worker('import', function (job) { return __await
         }
     });
 }); }, { concurrency: 300 });
-// importWorker.on('completed', job => {
-//     console.log(`(import) done:${job.data.length}`)
-// })
+importWorker.on('completed', function (job) {
+    console.log("(import) done: " + job.id);
+});
 importWorker.on('failed', function (job) {
-    console.log("(import) failed:" + JSON.stringify(job.failedReason));
+    console.error("(import) failed: " + job.id + " " + JSON.stringify(job.data) + " " + JSON.stringify(job.failedReason));
 });
 var exportWorker = new bullmq_1.Worker('export', function (job) { return __awaiter(void 0, void 0, void 0, function () {
     var marshalledUsersInfo, userIds, error_1;
@@ -232,6 +276,7 @@ var exportWorker = new bullmq_1.Worker('export', function (job) { return __await
                 return [3 /*break*/, 3];
             case 2:
                 error_1 = _a.sent();
+                console.error(error_1);
                 if (error_1.message.includes('photo')) {
                     return [2 /*return*/];
                 }
@@ -240,12 +285,12 @@ var exportWorker = new bullmq_1.Worker('export', function (job) { return __await
         }
     });
 }); }, { concurrency: 1000 });
-// exportWorker.on('completed', job => {
-//     console.log(`(export) done:${job.data.length}`)
-// })
+exportWorker.on('completed', function (job) {
+    console.log("(export) done:" + job.id);
+});
 exportWorker.on('failed', function (_a) {
     var data = _a.data, job = __rest(_a, ["data"]);
-    console.log("(export) failed:" + job.failedReason);
+    console.error("(export) failed: " + job.reasonFailed + " " + JSON.stringify(data));
 });
 function removeInvalidAccounts(usersInfo) {
     return usersInfo
@@ -268,5 +313,5 @@ function parsePhotoIdFromPhotoUrl(photoUrl) {
     }
 }
 addInitialJob()
-    .then(function () { schedulerQueue.close(); })["catch"](console.error);
+    .then(function () { queueSchedulers.forEach(function (s) { return s.close(); }); })["catch"](console.error);
 // https://abs.twimg.com/sticky/default_profile_images/default_profile_400x400.png
