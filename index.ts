@@ -41,7 +41,7 @@ async function getTwitterUsers(userIds: string[]): Promise<TwitterUser[]> {
 
     const twitterUserResponse = await getTwitterUsersLimit(() => needle('get', `https://api.twitter.com/2/users?ids=${userIds.join(',')}&user.fields=profile_image_url,public_metrics`, {
         headers: {
-            'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAABCINwEAAAAAE84d%2BfYIClOTvkrWajggz6%2FnQEo%3DCFjvHp6J0wnPIQSCA0IF9RLr0aPI4O7MkevqKsiawqJihElwmB'
+            'Authorization': process.ENV.TWITTER_AUTH
         }
     }))
 
@@ -54,7 +54,7 @@ async function getTwitterUsers(userIds: string[]): Promise<TwitterUser[]> {
 async function getTwitterFollowers(userid: string): Promise<TwitterUser[]> {
     const twitterUserResponse = await getTwitterFollowersLimit(() => needle('get', `https://api.twitter.com/2/users/${userid}/following?user.fields=profile_image_url,created_at,public_metrics&max_results=1000`, {
         headers: {
-            'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAABCINwEAAAAAE84d%2BfYIClOTvkrWajggz6%2FnQEo%3DCFjvHp6J0wnPIQSCA0IF9RLr0aPI4O7MkevqKsiawqJihElwmB'
+            'Authorization': process.ENV.TWITTER_AUTH
         }
     }))
     if (!twitterUserResponse.body.data) throw Error(twitterUserResponse.body)
